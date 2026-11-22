@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ruta de entregas · Córdoba</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Roboto,sans-serif;background:#f3f4f6;color:#111;font-size:16px}
+header{background:#1f6feb;color:#fff;padding:14px 16px;position:sticky;top:0;z-index:5}
+header h1{margin:0;font-size:19px}
+main{padding:12px;max-width:640px;margin:auto}
+.card{background:#fff;border-radius:12px;padding:12px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+textarea{width:100%;height:140px;font-size:15px;padding:8px;border:1px solid #ccc;border-radius:8px}
+button{background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:11px 14px;font-size:15px;margin:4px 4px 4px 0}
+button.sec{background:#e5e7eb;color:#111}
+button.ok{background:#16a34a}
+button.bad{background:#dc2626}
+button.gps{background:#0f766e}
+.summary{font-weight:600;margin-top:6px}
+.small{font-size:13px;color:#666}
+.hidden{display:none}
+.map{width:100%;height:auto;background:#eef2f7;border-radius:10px;display:block}
+.stop{border-left:5px solid #1f6feb;padding:10px;margin-bottom:10px;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.stop.entregado{border-color:#16a34a;opacity:.6}
+.stop.fallido{border-color:#dc2626}
+.stop.sinub{border-color:#f59e0b;border-left-style:dashed}
+.stopHead{font-weight:700;font-size:17px}
+.pk{display:inline-block;background:#e0ecff;color:#1f4fb4;border-radius:6px;padding:2px 7px;margin:2px;font-weight:600}
+.addr{color:#444;margin:6px 0;font-size:15px}
+.warnTxt{color:#b45309;font-weight:600;font-size:14px}
+</style>
+</head>
+<body>
+<header><h1>Ruta de entregas · Córdoba Capital</h1></header>
+<main>
+
+<div class="card">
+  <p><b>1. Pega tus paquetes</b>, una línea por paquete. Formato: <code>número - dirección</code></p>
+  <p class="small">Se agrega automáticamente «, Córdoba, Argentina» para ubicar cada dirección.</p>
+  <textarea id="input" placeholder="8 - Av. Colón 1500&#10;1 - Bv. Chacabuco 800&#10;10 - Av. Vélez Sarsfield 1200&#10;11 - Av. Vélez Sarsfield 1200"></textarea>
+  <div>
+    <button onclick="cargar()">Cargar paquetes</button>
+    <button class="sec" onclick="ejemplo()">Usar ejemplo</button>
+  </div>
+</div>
+
+<div class="card hidden" id="geoCard">
+  <p><b>2. Ubicar direcciones y tu GPS</b></p>
+  <button class="gps" onclick="activarGps()">Activar mi GPS</button>
+  <p class="small" id="gpsInfo">GPS apagado.</p>
+  <button onclick="geocodificarTodas()">Ubicar direcciones en el mapa</button>
+  <p class="small" id="geoInfo"></p>
+</div>
+
+<div class="card hidden" id="optCard">
+  <p><b>3. Optimizar ruta</b></p>
+  <label><input type="checkbox" id="desdeGps" checked> Empezar desde mi ubicación actual</label><br><br>
+  <label>Peso tiempo: <span id="pesoV">70</span>% (resto = kilómetros)</label><br>
+  <input type="range" id="peso" min="0" max="100" value="70" oninput="pesoV.textContent=this.value">
+  <br>
+  <button onclick="calcularRuta()">Calcular ruta</button>
+  <div class="summary" id="resumen"></div>
+  <div class="summary" id="progreso"></div>
+</div>
+
+<div class="card hidden" id="mapCard">
+  <svg id="mapa" class="map" viewBox="0 0 360 300"></svg>
+  <p class="small">Mapa con las ubicaciones reales (coordenadas). Azul = tú, números = orden de parada. Verde = entregado, rojo = no entregado.</p>
+</div>
+
+<div id="ruta"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const CENTRO = {lat:-31.4201, lng:-64.1888};   // centro de Córdoba Capital
+const VIEWBOX = "-64.36,-31.33,-64.10,-31.52"; // caja aproximada de la ciudad
+const VEL = 25;                                // km/h urbano (fallback)
+let paquetes = [];      // {num, dir}
+let paradas = [];       // {dir, lat, lng, paquetes:[], estado, orden}
+let ordenActual = [];   // paradas en el orden mostrado
+let miPos = null;       // {lat, lng, acc}
+let geoCache = JSON.parse(localStorage.getItem('geoCacheCba') || '{}');
+
+const norm = s => s.trim().toLowerCase().replace(/\s+/g,' ');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function ejemplo(){
+  $('input').value =
+`8 - Av. Colón 1500
+1 - Bv. Chacabuco 800
+10 - Av. Vélez Sarsfield 1200
+11 - Av. Vélez Sarsfield 1200
+2 - Av. Hipólito Yrigoyen 300
+3 - Bv. Illia 300
+4 - Av. Japón 500
+5 - Av. Rafael Núñez 4000
+6 - Av. Duarte Quirós 1500
+6 - Av. Duarte Quirós 1500
+7 - Obispo Trejo 200`;
+  cargar();
+}
+
+function cargar(){
+  const lineas = $('input').value.split('\n').map(l=>l.trim()).filter(Boolean);
+  paquetes = [];
+  for(const l of lineas){
+    const m = l.match(/^(\d+)\s*[-–:]\s*(.+)$/);
+    if(m) paquetes.push({num:parseInt(m[1]), dir:m[2].trim()});
+  }
+  if(!paquetes.length){ alert('No encontré paquetes. Usa el formato: número - dirección'); return; }
+
+  const mapa = new Map();
+  for(const p of paquetes){
+    const key = norm(p.dir);
+    if(!mapa.has(key)) mapa.set(key, {dir:p.dir, lat:null, lng:null, paquetes:[], estado:'pendiente'});
+    mapa.get(key).paquetes.push(p.num);
+  }
+  paradas = [...mapa.values()];
+  paradas.forEach(s => { s.paquetes.sort((a,b)=>a-b); aplicarCache(s); });
+  ordenActual = paradas.map((s,i) => ({...s, orden:i+1}));
+  ordenActual = paradas;
+  paradas.forEach((s,i)=> s.orden = i+1);
+
+  $('geoCard').classList.remove('hidden');
+  $('optCard').classList.remove('hidden');
+  $('mapCard').classList.remove('hidden');
+  $('resumen').textContent = '';
+  pintar();
+}
+
+function aplicarCache(s){
+  const c = geoCache[norm(s.dir)];
+  if(c){ s.lat = c.lat; s.lng = c.lng; }
+}
+
+/* ---------- GPS del teléfono ---------- */
+function activarGps(){
+  if(!navigator.geolocation){ $('gpsInfo').textContent = 'Este navegador no tiene GPS.'; return; }
+  $('gpsInfo').textContent = 'Buscando señal GPS…';
+  navigator.geolocation.watchPosition(
+    p => {
+      miPos = {lat:p.coords.latitude, lng:p.coords.longitude, acc:p.coords.accuracy};
+      $('gpsInfo').textContent = `GPS activo · precisión ±${Math.round(miPos.acc)} m`;
+      pintarMapa();
+    },
+    e => { $('gpsInfo').textContent = 'No se pudo obtener el GPS: ' + e.message + ' (revisa permisos de ubicación)'; },
+    {enableHighAccuracy:true, maximumAge:5000, timeout:15000}
+  );
+}
+
+/* ---------- Geocodificación (OpenStreetMap Nominatim, sesgada a Córdoba) ---------- */
+async function geocodificar(s){
+  const key = norm(s.dir);
+  if(geoCache[key]){ aplicarCache(s); return true; }
+  const q = encodeURIComponent(s.dir + ', Córdoba, Argentina');
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=ar&viewbox=${VIEWBOX}&q=${q}`;
+  const r = await fetch(url, {headers:{'Accept-Language':'es'}});
+  const j = await r.json();
+  if(j.length){
+    geoCache[key] = {lat:parseFloat(j[0].lat), lng:parseFloat(j[0].lon)};
+    localStorage.setItem('geoCacheCba', JSON.stringify(geoCache));
+    aplicarCache(s);
+    return true;
+  }
+  return false;
+}
+
+async function geocodificarTodas(){
+  const pend = paradas.filter(s => s.lat == null);
+  if(!pend.length){ $('geoInfo').textContent = 'Todas las direcciones ya están ubicadas.'; return; }
+  let ok=0, fail=0, err=0;
+  for(let i=0; i<pend.length; i++){
+    $('geoInfo').textContent = `Buscando ${i+1} de ${pend.length}…`;
+    try{ (await geocodificar(pend[i])) ? ok++ : fail++; }
+    catch(e){ err++; if(err>=3) break; }
+    await sleep(1100); // Nominatim pide máximo 1 consulta por segundo
+  }
+  $('geoInfo').textContent = `Ubicadas: ${ok} · No encontradas: ${fail}` + (err ? ` · Errores de conexión: ${err}` : '');
+  pintar();
+}
+
+async function corregir(s){
+  const nuevo = prompt('Corrige la dirección (calle y altura):', s.dir);
+  if(!nuevo) return;
+  s.dir = nuevo.trim();
+  s.lat = null; s.lng = null;
+  try{ await geocodificar(s); }catch(e){ alert('Sin conexión: intenta de nuevo.'); }
+  pintar();
+}
+
+/* ---------- Distancias reales (OSRM) con respaldo en línea recta ---------- */
+function hav(a,b){
+  const R=6371, rad=x=>x*Math.PI/180;
+  const dLat=rad(b.lat-a.lat), dLng=rad(b.lng-a.lng);
+  const h=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h))*1.3;
+}
+function matrizEstimada(nodos){
+  const n=nodos.length, km=[], min=[];
+  for(let i=0;i<n;i++){ km.push([]); min.push([]);
+    for(let j=0;j<n;j++){ const d=i===j?0:hav(nodos[i],nodos[j]); km[i].push(d); min[i].push(d/VEL*60); } }
+  return {km, min, real:false};
+}
+async function matriz(nodos){
+  try{
+    const coords = nodos.map(p=>`${p.lng},${p.lat}`).join(';');
+    const r = await fetch(`https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance,duration`);
+    const j = await r.json();
+    if(j.code !== 'Ok') throw new Error(j.code);
+    const n=nodos.length;
+    const km = j.distances.map((row,i)=>row.map((m,k)=> m==null ? hav(nodos[i],nodos[k]) : m/1000));
+    const min = j.durations.map((row,i)=>row.map((s,k)=> s==null ? (km[i][k]/VEL*60) : s/60));
+    return {km, min, real:true};
+  }catch(e){
+    return matrizEstimada(nodos);
+  }
+}
+
+/* ---------- Optimización: vecino más cercano + 2-opt ---------- */
+async function calcularRuta(){
+  const ubic = paradas.filter(s => s.lat != null);
+  const sin  = paradas.filter(s => s.lat == null);
+  if(!ubic.length){ alert('Primero ubica las direcciones (paso 2).'); return; }
+  const w = $('peso').value/100;
+  const conGps = $('desdeGps').checked && miPos;
+  const nodos = conGps ? [{lat:miPos.lat, lng:miPos.lng}, ...ubic] : ubic;
+  const offset = conGps ? 1 : 0;
+  const n = nodos.length;
+
+  $('resumen').textContent = 'Calculando ruta…';
+  const M = await matriz(nodos);
+  const c = (i,j) => w*M.min[i][j] + (1-w)*M.km[i][j]*3;
+
+  // Vecino más cercano desde el inicio (índice 0)
+  const libres = [...Array(n).keys()].slice(1);
+  let ruta = [0];
+  while(libres.length){
+    const last = ruta[ruta.length-1];
+    let bj=0, bc=Infinity;
+    libres.forEach((x,j)=>{ const cc=c(last,x); if(cc<bc){ bc=cc; bj=j; } });
+    ruta.push(libres[bj]); libres.splice(bj,1);
+  }
+  // 2-opt (el inicio queda fijo)
+  const costeRuta = r => { let t=0; for(let i=0;i<r.length-1;i++) t+=c(r[i],r[i+1]); return t; };
+  let mejor = costeRuta(ruta), mejorado = true;
+  while(mejorado){
+    mejorado = false;
+    for(let i=1;i<n-1;i++) for(let k=i+1;k<n;k++){
+      const nr = [...ruta.slice(0,i), ...ruta.slice(i,k+1).reverse(), ...ruta.slice(k+1)];
+      const cc = costeRuta(nr);
+      if(cc < mejor-1e-9){ ruta=nr; mejor=cc; mejorado=true; }
+    }
+  }
+
+  // Totales reales de la ruta
+  let km=0, min=0;
+  for(let i=0;i<ruta.length-1;i++){ km+=M.km[ruta[i]][ruta[i+1]]; min+=M.min[ruta[i]][ruta[i+1]]; }
+
+  const ordenUbic = ruta.filter(i => i>=offset).map(i => nodos[i]);
+  ordenActual = [...ordenUbic, ...sin];
+  ordenActual.forEach((s,i)=> s.orden = i+1);
+
+  const h = Math.floor(min/60), m = Math.round(min%60);
+  $('resumen').textContent =
+    `Total: ${paquetes.length} paquetes · ${paradas.length} paradas · ${km.toFixed(1)} km · ${h} h ${m} min` +
+    (M.real ? ' (distancias por calles)' : ' (estimado en línea recta, sin conexión)');
+  if(sin.length) $('resumen').textContent += ` · ${sin.length} sin ubicar al final`;
+  pintar();
+}
+
+/* ---------- Pantalla ---------- */
+function pintar(){
+  pintarLista();
+  pintarMapa();
+  const total = ordenActual.length;
+  const entregados = ordenActual.filter(s=>s.estado==='entregado').length;
+  $('progreso').textContent = total ? `Entregadas: ${entregados} de ${total} paradas` : '';
+}
+
+function pintarLista(){
+  let html = `<div class="card"><b>${ordenActual.some(s=>s.orden && s.orden!==0) && $('resumen').textContent.startsWith('Total') ? 'Ruta optimizada' : 'Orden original'}</b></div>`;
+  ordenActual.forEach((s,i)=>{
+    const ubicada = s.lat != null;
+    const etiqueta = s.paquetes.length>1 ? 'Paquetes' : 'Paquete';
+    const pk = `<span class="pk">${etiqueta} ${s.paquetes.join(', ')}</span>`;
+    const clase = !ubicada ? 'sinub' : s.estado==='entregado' ? 'entregado' : s.estado==='fallido' ? 'fallido' : '';
+    html += `<div class="stop ${clase}">
+      <div class="stopHead">Parada ${i+1}${ubicada ? '' : ' · <span class="warnTxt">sin ubicar</span>'}</div>
+      <div>${pk}</div>
+      <div class="addr">${s.dir}</div>`;
+    if(ubicada){
+      html += `<button class="ok" onclick="marcar(${i},'entregado')">Entregado</button>
+      <button class="bad" onclick="marcar(${i},'fallido')">No entregado</button>
+      <button class="sec" onclick="navegar(${i})">Navegar</button>`;
+    } else {
+      html += `<button class="sec" onclick="corregirI(${i})">Corregir dirección</button>`;
+    }
+    html += `</div>`;
+  });
+  $('ruta').innerHTML = html;
+}
+
+function marcar(i,estado){
+  ordenActual[i].estado = estado;
+  pintar();
+}
+
+function corregirI(i){ corregir(ordenActual[i]); }
+
+function navegar(i){
+  const s = ordenActual[i];
+  window.open(`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}&travelmode=driving`, '_blank');
+}
+
+function pintarMapa(){
+  const svg = $('mapa');
+  const ubic = ordenActual.filter(s => s.lat != null);
+  const pts = ubic.map(s => ({lat:s.lat, lng:s.lng, n:s.orden, s}));
+  if(miPos) pts.unshift({lat:miPos.lat, lng:miPos.lng, origen:true});
+  if(!pts.length){
+    svg.innerHTML = '<text x="180" y="150" text-anchor="middle" fill="#666" font-size="14">Ubica las direcciones para ver el mapa</text>';
+    return;
+  }
+  const k = Math.cos(CENTRO.lat*Math.PI/180);
+  const xs = pts.map(p=>p.lng*k), ys = pts.map(p=>-p.lat);
+  const minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
+  const W=360, H=300, pad=28;
+  const rx = (maxX-minX) || 0.002, ry = (maxY-minY) || 0.002;
+  const sc = Math.min((W-2*pad)/rx, (H-2*pad)/ry);
+  const offX = (W-rx*sc)/2, offY = (H-ry*sc)/2;
+  pts.forEach(p=>{ p.x = offX + (p.lng*k-minX)*sc; p.y = offY + (-p.lat-minY)*sc; });
+
+  let g = `<rect width="${W}" height="${H}" fill="#eef2f7"/>`;
+  g += `<polyline fill="none" stroke="#1f6feb" stroke-width="2" stroke-dasharray="4 3" points="${pts.map(p=>p.x.toFixed(1)+','+p.y.toFixed(1)).join(' ')}"/>`;
+  pts.forEach(p=>{
+    if(p.origen){
+      g += `<circle cx="${p.x}" cy="${p.y}" r="8" fill="#fff" stroke="#1f6feb" stroke-width="4"/>`;
+    } else {
+      const col = p.s.estado==='entregado' ? '#16a34a' : p.s.estado==='fallido' ? '#dc2626' : '#1f6feb';
+      g += `<circle cx="${p.x}" cy="${p.y}" r="11" fill="${col}"/>
+            <text x="${p.x}" y="${p.y+4}" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">${p.n}</text>`;
+    }
+  });
+  svg.innerHTML = g;
+}
+</script>
+</body>
+</html>
