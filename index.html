@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -56,8 +57,8 @@ button.gps{background:#0f766e}
 <div class="card hidden" id="optCard">
   <p><b>3. Optimizar ruta</b></p>
   <label><input type="checkbox" id="desdeGps" checked> Empezar desde mi ubicación actual</label><br><br>
-  <label>Peso tiempo: <span id="pesoV">70</span>% (resto = kilómetros)</label><br>
-  <input type="range" id="peso" min="0" max="100" value="70" oninput="pesoV.textContent=this.value">
+  <label>Peso tiempo: <span id="pesoV">0</span>% (0 = solo kilómetros, 100 = solo tiempo)</label><br>
+  <input type="range" id="peso" min="0" max="100" value="0" oninput="pesoV.textContent=this.value">
   <br>
   <button onclick="calcularRuta()">Calcular ruta</button>
   <div class="summary" id="resumen"></div>
@@ -233,25 +234,46 @@ async function calcularRuta(){
   const M = await matriz(nodos);
   const c = (i,j) => w*M.min[i][j] + (1-w)*M.km[i][j]*3;
 
-  // Vecino más cercano desde el inicio (índice 0)
-  const libres = [...Array(n).keys()].slice(1);
-  let ruta = [0];
-  while(libres.length){
-    const last = ruta[ruta.length-1];
-    let bj=0, bc=Infinity;
-    libres.forEach((x,j)=>{ const cc=c(last,x); if(cc<bc){ bc=cc; bj=j; } });
-    ruta.push(libres[bj]); libres.splice(bj,1);
-  }
-  // 2-opt (el inicio queda fijo)
   const costeRuta = r => { let t=0; for(let i=0;i<r.length-1;i++) t+=c(r[i],r[i+1]); return t; };
-  let mejor = costeRuta(ruta), mejorado = true;
-  while(mejorado){
-    mejorado = false;
-    for(let i=1;i<n-1;i++) for(let k=i+1;k<n;k++){
-      const nr = [...ruta.slice(0,i), ...ruta.slice(i,k+1).reverse(), ...ruta.slice(k+1)];
-      const cc = costeRuta(nr);
-      if(cc < mejor-1e-9){ ruta=nr; mejor=cc; mejorado=true; }
+  // Mejora una ruta con 2-opt y reubicación de segmentos (Or-opt) hasta que no haya mejoras
+  const mejorar = r0 => {
+    let r = r0, mejor = costeRuta(r), mej = true;
+    while(mej){
+      mej = false;
+      for(let i=1;i<n-1;i++) for(let k=i+1;k<n;k++){
+        const nr = [...r.slice(0,i), ...r.slice(i,k+1).reverse(), ...r.slice(k+1)];
+        const cc = costeRuta(nr);
+        if(cc < mejor-1e-9){ r=nr; mejor=cc; mej=true; }
+      }
+      for(let L=1; L<=3; L++) for(let i=1; i+L<=n; i++){
+        const seg = r.slice(i,i+L), resto = [...r.slice(0,i), ...r.slice(i+L)];
+        for(let j=1; j<=resto.length; j++){
+          if(j===i) continue;
+          const nr = [...resto.slice(0,j), ...seg, ...resto.slice(j)];
+          const cc = costeRuta(nr);
+          if(cc < mejor-1e-9){ r=nr; mejor=cc; mej=true; break; }
+        }
+      }
     }
+    return r;
+  };
+  // Vecino más cercano desde un inicio dado
+  const vecino = s => {
+    const libres = [...Array(n).keys()].filter(x => x!==s), r = [s];
+    while(libres.length){
+      const last = r[r.length-1]; let bj=0, bc=Infinity;
+      libres.forEach((x,j)=>{ const cc=c(last,x); if(cc<bc){ bc=cc; bj=j; } });
+      r.push(libres[bj]); libres.splice(bj,1);
+    }
+    return r;
+  };
+  // Con GPS: la ruta arranca en tu posición. Sin GPS: probar varios puntos de inicio.
+  const inicios = conGps ? [0] : [...Array(n).keys()].filter((_,i) => i % Math.ceil(n/12) === 0);
+  let ruta = null, mejorCoste = Infinity;
+  for(const s of inicios){
+    const r = mejorar(vecino(s));
+    const cc = costeRuta(r);
+    if(cc < mejorCoste){ mejorCoste = cc; ruta = r; }
   }
 
   // Totales reales de la ruta
